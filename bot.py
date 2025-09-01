@@ -104,31 +104,80 @@ async def my_rank_command(interaction: discord.Interaction):
 @app_commands.checks.has_permissions(administrator=True)
 async def show_members_command(interaction: discord.Interaction):
     await interaction.response.defer()
+    guild = interaction.guild
+
     try:
-        query = supabase.table('queue').select('players(id, valorant_nickname, highest_tier, current_tier)').order('created_at').limit(10)
+        # [수정] 서버를 나간 인원을 대비해 넉넉하게 30명을 우선 조회합니다.
+        query = supabase.table('queue').select('players(id, valorant_nickname, highest_tier, current_tier)').order('created_at').limit(30)
         response = query.execute()
-        members = response.data
+        all_potential_members = response.data
+
+        # 전체 대기 인원 수는 정확히 카운트합니다.
         count_response = supabase.table('queue').select('player_id', count='exact').execute()
         total_count = count_response.count
-        if not members:
-            await interaction.followup.send("현재 대기 중인 멤버가 없습니다."); return
-        embed = discord.Embed(title="⚔️ 다음 내전 참여 예정 멤버", description=f"총 {total_count}명이 대기 중입니다.", color=discord.Color.gold())
-        member_list = []
-        for idx, member_data in enumerate(members):
+
+        if not all_potential_members:
+            await interaction.followup.send("현재 대기 중인 멤버가 없습니다.")
+            return
+
+        valid_members_list = []
+        removed_members_list = []
+
+        # [수정] 유효한 멤버 10명을 채울 때까지 순차적으로 확인합니다.
+        for member_data in all_potential_members:
+            # 최종 목록이 10명이 되면 더 이상 확인하지 않습니다.
+            if len(valid_members_list) >= 10:
+                break
+
             player = member_data['players']
-            if player:
+            if not player: continue
+
+            player_id = player['id']
+            member = guild.get_member(player_id)
+
+            if member:
+                # 서버에 존재하는 멤버는 최종 목록에 추가합니다.
+                valid_members_list.append(player)
+            else:
+                # 서버에 없는 멤버는 DB에서 삭제하고, 관리자에게 알려주기 위해 명단에 추가합니다.
+                print(f"서버에 없는 유저 발견 (ID: {player_id}). 대기열에서 삭제합니다.")
                 try:
-                    user = await bot.fetch_user(player['id']); mention = user.mention
-                except discord.NotFound:
-                    mention = f"ID: {player['id']} (찾을 수 없음)"
-                h_tier = player.get('highest_tier') or '정보없음'
-                c_tier = player.get('current_tier') or '정보없음'
-                line = f"`{idx + 1:2d}` {mention} | `{player['valorant_nickname']}` (`{h_tier}` / `{c_tier}`)"
-                member_list.append(line)
-        embed.add_field(name="참여자 목록 (선착순 10명)", value="\n".join(member_list), inline=False)
+                    supabase.table('queue').delete().eq('player_id', player_id).execute()
+                    valorant_nick = player.get('valorant_nickname', '정보없음')
+                    removed_members_list.append(f"ID: `{player_id}` (닉네임: `{valorant_nick}`)")
+                except Exception as e:
+                    print(f"DB에서 유저(ID: {player_id}) 삭제 중 오류: {e}")
+
+        # 최종 결과를 임베드로 만듭니다.
+        embed = discord.Embed(title="⚔️ 다음 내전 참여 예정 멤버", description=f"현재 총 대기 인원: {total_count}명", color=discord.Color.gold())
+        
+        member_display_list = []
+        if valid_members_list:
+            for idx, player in enumerate(valid_members_list):
+                user_mention = guild.get_member(player['id']).mention
+                h_tier = player.get('highest_tier', '정보없음')
+                c_tier = player.get('current_tier', '정보없음')
+                line = f"`{idx + 1:2d}` {user_mention} | `{player['valorant_nickname']}` (`{h_tier}` / `{c_tier}`)"
+                member_display_list.append(line)
+            
+            embed.add_field(name=f"✅ 참여자 목록 (선착순 {len(member_display_list)}명)", value="\n".join(member_display_list), inline=False)
+        else:
+            embed.add_field(name="✅ 참여자 목록", value="대기열을 확인했지만 현재 서버에 있는 유저가 없습니다.", inline=False)
+
+        # 자동으로 제외된 멤버가 있다면, 그 명단을 별도로 표시해줍니다.
+        if removed_members_list:
+            embed.add_field(name="⚠️ 서버를 나가 자동으로 제외된 멤버", value="\n".join(removed_members_list), inline=False)
+            embed.set_footer(text="서버를 나간 인원은 대기열에서 자동으로 제외됩니다.")
+
         await interaction.followup.send(embed=embed)
+
     except Exception as e:
-        print(f"멤버 공개 오류: {e}"); await interaction.followup.send("❌ 멤버 목록을 불러오는 중 오류가 발생했습니다.")
+        print(f"멤버 공개 오류: {e}")
+        await interaction.followup.send("❌ 멤버 목록을 불러오는 중 오류가 발생했습니다.")
+
+
+
+
 
 @bot.tree.command(name="내전모집", description="내전 대기열 참여 메시지를 보냅니다. (관리자용)")
 @app_commands.checks.has_permissions(administrator=True)
@@ -159,39 +208,76 @@ async def kick_member_command(interaction: discord.Interaction, 유저: discord.
 @app_commands.checks.has_permissions(administrator=True)
 async def start_civil_war_command(interaction: discord.Interaction, 공지내용: str = "내전이 시작되었습니다! 지정된 음성 채널로 모여주세요."):
     await interaction.response.defer()
+    guild = interaction.guild
+
     try:
-        team_response = supabase.table('queue').select('players(id)').order('created_at').limit(10).execute()
-        members = team_response.data
-        
-        # 10명인지 확인하는 부분을 제거하고, 1명도 없는지만 확인합니다.
-        if not members:
-            await interaction.followup.send(f"❌ 대기열에 멤버가 없습니다.", ephemeral=True)
+        # 1. [수정] 서버 나간 인원을 대비해 넉넉하게 30명 조회
+        team_response = supabase.table('queue').select('players(id, valorant_nickname)').order('created_at').limit(30).execute()
+        all_potential_members = team_response.data
+
+        if not all_potential_members:
+            await interaction.followup.send("❌ 대기열에 멤버가 없습니다.", ephemeral=True)
             return
-        
+
+        # 2. [신규] 실제 DM을 보낼 유효 멤버 리스트와 실패 리스트 준비
+        valid_members_to_dm = []
+        removed_members_log = [] # 서버 나가서 자동 제외된 멤버 기록용
+
+        for member_data in all_potential_members:
+            # 유효 멤버 10명을 모두 찾았으면 종료
+            if len(valid_members_to_dm) >= 10:
+                break
+
+            player = member_data['players']
+            if not player: continue
+
+            player_id = player['id']
+            member = guild.get_member(player_id)
+
+            if member:
+                # 서버에 있으면 DM 발송 대상 리스트에 추가
+                valid_members_to_dm.append(member)
+            else:
+                # 서버에 없으면 DB에서 삭제
+                print(f"내전 시작 중 서버에 없는 유저 발견 (ID: {player_id}). 대기열에서 삭제합니다.")
+                try:
+                    supabase.table('queue').delete().eq('player_id', player_id).execute()
+                    valorant_nick = player.get('valorant_nickname', '정보없음')
+                    removed_members_log.append(f"`{valorant_nick}` (ID: {player_id})")
+                except Exception as e:
+                    print(f"DB에서 유저(ID: {player_id}) 삭제 중 오류: {e}")
+
+        # 3. [수정] 확정된 유효 멤버들에게만 DM 발송
+        if not valid_members_to_dm:
+            await interaction.followup.send("❌ 대기열의 멤버들이 모두 서버를 나간 것으로 확인되어 DM을 보낼 대상이 없습니다.")
+            return
+
         sent_users = []
         failed_users = []
-        
         embed = discord.Embed(title="🔔 내전 시작 알림", description=공지내용, color=discord.Color.green())
-        
-        for member_data in members:
-            player = member_data['players']
-            if player:
-                user = await bot.fetch_user(player['id'])
-                try:
-                    await user.send(embed=embed)
-                    sent_users.append(user.mention)
-                except discord.Forbidden:
-                    failed_users.append(user.mention)
-        
-        result_embed = discord.Embed(title="✅ 내전 시작 알림 발송 완료", description=f"총 {len(sent_users) + len(failed_users)}명에게 DM 발송을 시도했습니다.", color=discord.Color.blue())
+
+        for user in valid_members_to_dm:
+            try:
+                await user.send(embed=embed)
+                sent_users.append(user.mention)
+            except discord.Forbidden:
+                failed_users.append(user.mention)
+
+        # 4. 최종 결과 리포트
+        result_embed = discord.Embed(title="✅ 내전 시작 알림 발송 완료", description=f"총 {len(valid_members_to_dm)}명의 유효 멤버에게 DM 발송을 시도했습니다.", color=discord.Color.blue())
         result_embed.add_field(name="✉️ DM 발송 성공", value="\n".join(sent_users) if sent_users else "없음", inline=False)
+        
         if failed_users:
             result_embed.add_field(name="⚠️ DM 발송 실패 (DM을 차단한 유저)", value="\n".join(failed_users), inline=False)
         
+        if removed_members_log:
+            result_embed.add_field(name="🧹 자동으로 대기열에서 제외된 유저", value="\n".join(removed_members_log), inline=False)
+            
         await interaction.followup.send(embed=result_embed)
 
     except Exception as e:
-        print(f"내전 시작 오류: {e}"); await interaction.followup.send("❌ 내전 시작 처리 중 오류가 발생했습니다.", ephemeral=True)
+        print(f"내전 시작 오류: {e}")
+        await interaction.followup.send("❌ 내전 시작 처리 중 오류가 발생했습니다.", ephemeral=True)
 
 
 @bot.tree.command(name="모집마감", description="특정 내전 모집 메시지의 참여 버튼을 비활성화합니다. (관리자용)")
