@@ -23,7 +23,7 @@ class JoinView(discord.ui.View):
             self.bot.supabase.table('queue').insert({'player_id': user_id}).execute()
             queue_response = self.bot.supabase.table('queue').select('player_id', count='exact').order('created_at').execute()
             total_in_queue = queue_response.count
-            await interaction.followup.send(f"✅ 내전 대기열 참여 신청이 완료되었습니다! 현재 대기 순서는 {total_in_queue}번입니다.", ephemeral=True)
+            await interaction.followup.send(f"✅ 내전 대기열 참여 신청이 완료되었습니다! 현재 대기 순서는 {total_in_queue}번입니다. (참여 멤버 + 추가 대기열 멤버)", ephemeral=True)
         except Exception as e:
             print(f"내전 참여 처리 오류: {e}")
             await interaction.followup.send("❌ 내전 참여 처리 중 오류가 발생했습니다.", ephemeral=True)
