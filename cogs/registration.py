@@ -58,6 +58,73 @@ class Registration(commands.Cog):
         except Exception as e:
             print(f"내 순서 확인 오류: {e}")
             await interaction.followup.send("❌ 순서 확인 중 오류가 발생했습니다.", ephemeral=True)
+    
+    @app_commands.command(name="포인트", description="나의 현재 내전 포인트와 전체 랭킹을 확인합니다.")
+    async def my_points_command(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            user_id = interaction.user.id
+        
+            # 1. [수정] DB에서 모든 유저의 포인트 정보를 랭킹 순으로 가져옵니다.
+            all_players_res = self.bot.supabase.table('players').select('id, points').order('points', desc=True).execute()
+        
+            if not all_players_res.data:
+                await interaction.followup.send("아직 랭킹 데이터가 없습니다.", ephemeral=True)
+                return
+
+            all_players = all_players_res.data
+        
+            # 2. [신규] 내 순위와 포인트를 찾습니다.
+            my_rank = -1
+            my_points = 0
+        
+            for idx, player in enumerate(all_players):
+                if player['id'] == user_id:
+                    my_rank = idx + 1
+                    my_points = player.get('points', 0)
+                    break
+        
+            # 3. [수정] 결과에 따라 다른 메시지를 보냅니다.
+            if my_rank != -1:
+                await interaction.followup.send(
+                    f"현재 {interaction.user.mention} 님의 내전 포인트는 **{my_points}점** 입니다. (전체 랭킹: **{my_rank}등**)",
+                    ephemeral=True
+                )
+            else:
+                # 랭킹에 없다는 것은 정보 등록을 안 했거나 포인트가 0점인 경우
+                await interaction.followup.send("아직 `/정보등록`을 하지 않았거나 내전 참여 기록이 없습니다.", ephemeral=True)
+
+        except Exception as e:
+            print(f"포인트 확인 오류: {e}")
+            await interaction.followup.send("❌ 포인트 확인 중 오류가 발생했습니다.", ephemeral=True)
+    
+    @app_commands.command(name="랭킹", description="서버 내 내전 포인트 랭킹 TOP 10을 보여줍니다.")
+    async def rank_command(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        try:
+            # points 컬럼을 기준으로 내림차순 정렬하여 상위 10명을 가져옵니다.
+            rankers_res = self.bot.supabase.table('players').select('id, points').order('points', desc=True).limit(10).execute()
+        
+            if not rankers_res.data:
+                await interaction.followup.send("아직 랭킹 데이터가 없습니다."); return
+
+            embed = discord.Embed(title="🏆 내전 포인트 랭킹", description="서버 내 포인트 랭킹 TOP 10입니다.", color=discord.Color.blue())
+        
+            rank_list = []
+            for idx, ranker in enumerate(rankers_res.data):
+                try:
+                    user = await self.bot.fetch_user(ranker['id'])
+                    mention = user.mention
+                except discord.NotFound:
+                    mention = f"ID: {ranker['id']} (알 수 없음)"
+            
+                points = ranker.get('points', 0)
+                rank_list.append(f"`{idx + 1:2d}` {mention} - **{points}점**")
+        
+            embed.add_field(name="TOP 10", value="\n".join(rank_list), inline=False)
+            await interaction.followup.send(embed=embed)
+        except Exception as e:
+            print(f"랭킹 확인 오류: {e}"); await interaction.followup.send("❌ 랭킹을 불러오는 중 오류가 발생했습니다.")
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(Registration(bot))
